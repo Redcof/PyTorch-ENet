@@ -1,5 +1,6 @@
 import torch.nn as nn
 import torch
+from torchvision.ops import deform_conv2d
 
 
 class InitialBlock(nn.Module):
@@ -116,7 +117,7 @@ class RegularBottleneck(nn.Module):
                  padding=0,
                  dilation=1,
                  asymmetric=False,
-                 dropout_prob=0,
+                 dropout_prob=0.0,
                  bias=False,
                  relu=True):
         super().__init__()
@@ -143,53 +144,44 @@ class RegularBottleneck(nn.Module):
 
         # 1x1 projection convolution
         self.ext_conv1 = nn.Sequential(
-            nn.Conv2d(
-                channels,
-                internal_channels,
-                kernel_size=1,
-                stride=1,
-                bias=bias), nn.BatchNorm2d(internal_channels), activation())
+            nn.Conv2d(channels, internal_channels, kernel_size=1, stride=1, bias=bias),
+            nn.BatchNorm2d(internal_channels),
+            activation()
+        )
 
         # If the convolution is asymmetric we split the main convolution in
         # two. Eg. for a 5x5 asymmetric convolution we have two convolution:
         # the first is 5x1 and the second is 1x5.
         if asymmetric:
             self.ext_conv2 = nn.Sequential(
-                nn.Conv2d(
-                    internal_channels,
-                    internal_channels,
-                    kernel_size=(kernel_size, 1),
-                    stride=1,
-                    padding=(padding, 0),
-                    dilation=dilation,
-                    bias=bias), nn.BatchNorm2d(internal_channels), activation(),
-                nn.Conv2d(
-                    internal_channels,
-                    internal_channels,
-                    kernel_size=(1, kernel_size),
-                    stride=1,
-                    padding=(0, padding),
-                    dilation=dilation,
-                    bias=bias), nn.BatchNorm2d(internal_channels), activation())
+                nn.Conv2d(internal_channels, internal_channels,
+                          kernel_size=(kernel_size, 1),
+                          stride=1, padding=(padding, 0),
+                          dilation=dilation, bias=bias),
+                nn.BatchNorm2d(internal_channels),
+                activation(),
+                nn.Conv2d(internal_channels, internal_channels,
+                          kernel_size=(1, kernel_size), stride=1,
+                          padding=(0, padding), dilation=dilation,
+                          bias=bias),
+                nn.BatchNorm2d(internal_channels),
+                activation()
+            )
         else:
             self.ext_conv2 = nn.Sequential(
-                nn.Conv2d(
-                    internal_channels,
-                    internal_channels,
-                    kernel_size=kernel_size,
-                    stride=1,
-                    padding=padding,
-                    dilation=dilation,
-                    bias=bias), nn.BatchNorm2d(internal_channels), activation())
+                nn.Conv2d(internal_channels, internal_channels,
+                          kernel_size=kernel_size, stride=1,
+                          padding=padding, dilation=dilation, bias=bias),
+                nn.BatchNorm2d(internal_channels),
+                activation())
 
         # 1x1 expansion convolution
         self.ext_conv3 = nn.Sequential(
-            nn.Conv2d(
-                internal_channels,
-                channels,
-                kernel_size=1,
-                stride=1,
-                bias=bias), nn.BatchNorm2d(channels), activation())
+            nn.Conv2d(internal_channels, channels,
+                      kernel_size=1, stride=1,
+                      bias=bias),
+            nn.BatchNorm2d(channels),
+            activation())
 
         self.ext_regul = nn.Dropout2d(p=dropout_prob)
 
@@ -250,7 +242,7 @@ class DownsamplingBottleneck(nn.Module):
                  out_channels,
                  internal_ratio=4,
                  return_indices=False,
-                 dropout_prob=0,
+                 dropout_prob=0.0,
                  bias=False,
                  relu=True):
         super().__init__()
@@ -344,7 +336,10 @@ class DownsamplingBottleneck(nn.Module):
         # Add main and extension branches
         out = main + ext
 
-        return self.out_activation(out), max_indices
+        if self.return_indices:
+            return self.out_activation(out), max_indices
+        else:
+            return self.out_activation(out)
 
 
 class UpsamplingBottleneck(nn.Module):
@@ -385,7 +380,7 @@ class UpsamplingBottleneck(nn.Module):
                  in_channels,
                  out_channels,
                  internal_ratio=4,
-                 dropout_prob=0,
+                 dropout_prob=0.0,
                  bias=False,
                  relu=True):
         super().__init__()
@@ -424,14 +419,16 @@ class UpsamplingBottleneck(nn.Module):
             nn.BatchNorm2d(internal_channels), activation())
 
         # Transposed convolution
-        self.ext_tconv1 = nn.ConvTranspose2d(
+        self.ext_tconv1 = nn.Sequential(nn.ConvTranspose2d(
             internal_channels,
             internal_channels,
             kernel_size=2,
             stride=2,
-            bias=bias)
-        self.ext_tconv1_bnorm = nn.BatchNorm2d(internal_channels)
-        self.ext_tconv1_activation = activation()
+            bias=bias),
+            nn.BatchNorm2d(internal_channels),
+            activation())
+        # self.ext_tconv1_bnorm = nn.BatchNorm2d(internal_channels)
+        # self.ext_tconv1_activation = activation()
 
         # 1x1 expansion convolution
         self.ext_conv2 = nn.Sequential(
@@ -453,8 +450,8 @@ class UpsamplingBottleneck(nn.Module):
         # Extension branch
         ext = self.ext_conv1(x)
         ext = self.ext_tconv1(ext, output_size=output_size)
-        ext = self.ext_tconv1_bnorm(ext)
-        ext = self.ext_tconv1_activation(ext)
+        # ext = self.ext_tconv1_bnorm(ext)
+        # ext = self.ext_tconv1_activation(ext)
         ext = self.ext_conv2(ext)
         ext = self.ext_regul(ext)
 
@@ -484,103 +481,47 @@ class ENet(nn.Module):
         self.initial_block = InitialBlock(3, 16, relu=encoder_relu)
 
         # Stage 1 - Encoder
-        self.downsample1_0 = DownsamplingBottleneck(
-            16,
-            64,
-            return_indices=True,
-            dropout_prob=0.01,
-            relu=encoder_relu)
-        self.regular1_1 = RegularBottleneck(
-            64, padding=1, dropout_prob=0.01, relu=encoder_relu)
-        self.regular1_2 = RegularBottleneck(
-            64, padding=1, dropout_prob=0.01, relu=encoder_relu)
-        self.regular1_3 = RegularBottleneck(
-            64, padding=1, dropout_prob=0.01, relu=encoder_relu)
-        self.regular1_4 = RegularBottleneck(
-            64, padding=1, dropout_prob=0.01, relu=encoder_relu)
+        self.downsample1_0 = DownsamplingBottleneck(16, 64, return_indices=True, dropout_prob=0.01, relu=encoder_relu)
+        self.regular1_1 = RegularBottleneck(64, padding=1, dropout_prob=0.01, relu=encoder_relu)
+        self.regular1_2 = RegularBottleneck(64, padding=1, dropout_prob=0.01, relu=encoder_relu)
+        self.regular1_3 = RegularBottleneck(64, padding=1, dropout_prob=0.01, relu=encoder_relu)
+        self.regular1_4 = RegularBottleneck(64, padding=1, dropout_prob=0.01, relu=encoder_relu)
 
         # Stage 2 - Encoder
-        self.downsample2_0 = DownsamplingBottleneck(
-            64,
-            128,
-            return_indices=True,
-            dropout_prob=0.1,
-            relu=encoder_relu)
-        self.regular2_1 = RegularBottleneck(
-            128, padding=1, dropout_prob=0.1, relu=encoder_relu)
-        self.dilated2_2 = RegularBottleneck(
-            128, dilation=2, padding=2, dropout_prob=0.1, relu=encoder_relu)
-        self.asymmetric2_3 = RegularBottleneck(
-            128,
-            kernel_size=5,
-            padding=2,
-            asymmetric=True,
-            dropout_prob=0.1,
-            relu=encoder_relu)
-        self.dilated2_4 = RegularBottleneck(
-            128, dilation=4, padding=4, dropout_prob=0.1, relu=encoder_relu)
-        self.regular2_5 = RegularBottleneck(
-            128, padding=1, dropout_prob=0.1, relu=encoder_relu)
-        self.dilated2_6 = RegularBottleneck(
-            128, dilation=8, padding=8, dropout_prob=0.1, relu=encoder_relu)
-        self.asymmetric2_7 = RegularBottleneck(
-            128,
-            kernel_size=5,
-            asymmetric=True,
-            padding=2,
-            dropout_prob=0.1,
-            relu=encoder_relu)
-        self.dilated2_8 = RegularBottleneck(
-            128, dilation=16, padding=16, dropout_prob=0.1, relu=encoder_relu)
+        self.downsample2_0 = DownsamplingBottleneck(64, 128, return_indices=True, dropout_prob=0.1, relu=encoder_relu)
+        self.regular2_1 = RegularBottleneck(128, padding=1, dropout_prob=0.1, relu=encoder_relu)
+        self.dilated2_2 = RegularBottleneck(128, dilation=2, padding=2, dropout_prob=0.1, relu=encoder_relu)
+        self.asymmetric2_3 = RegularBottleneck(128, kernel_size=5, padding=2, asymmetric=True, dropout_prob=0.1,
+                                               relu=encoder_relu)
+        self.dilated2_4 = RegularBottleneck(128, dilation=4, padding=4, dropout_prob=0.1, relu=encoder_relu)
+        self.regular2_5 = RegularBottleneck(128, padding=1, dropout_prob=0.1, relu=encoder_relu)
+        self.dilated2_6 = RegularBottleneck(128, dilation=8, padding=8, dropout_prob=0.1, relu=encoder_relu)
+        self.asymmetric2_7 = RegularBottleneck(128, kernel_size=5, asymmetric=True, padding=2, dropout_prob=0.1,
+                                               relu=encoder_relu)
+        self.dilated2_8 = RegularBottleneck(128, dilation=16, padding=16, dropout_prob=0.1, relu=encoder_relu)
 
         # Stage 3 - Encoder
-        self.regular3_0 = RegularBottleneck(
-            128, padding=1, dropout_prob=0.1, relu=encoder_relu)
-        self.dilated3_1 = RegularBottleneck(
-            128, dilation=2, padding=2, dropout_prob=0.1, relu=encoder_relu)
-        self.asymmetric3_2 = RegularBottleneck(
-            128,
-            kernel_size=5,
-            padding=2,
-            asymmetric=True,
-            dropout_prob=0.1,
-            relu=encoder_relu)
-        self.dilated3_3 = RegularBottleneck(
-            128, dilation=4, padding=4, dropout_prob=0.1, relu=encoder_relu)
-        self.regular3_4 = RegularBottleneck(
-            128, padding=1, dropout_prob=0.1, relu=encoder_relu)
-        self.dilated3_5 = RegularBottleneck(
-            128, dilation=8, padding=8, dropout_prob=0.1, relu=encoder_relu)
-        self.asymmetric3_6 = RegularBottleneck(
-            128,
-            kernel_size=5,
-            asymmetric=True,
-            padding=2,
-            dropout_prob=0.1,
-            relu=encoder_relu)
-        self.dilated3_7 = RegularBottleneck(
-            128, dilation=16, padding=16, dropout_prob=0.1, relu=encoder_relu)
+        self.regular3_0 = RegularBottleneck(128, padding=1, dropout_prob=0.1, relu=encoder_relu)
+        self.dilated3_1 = RegularBottleneck(128, dilation=2, padding=2, dropout_prob=0.1, relu=encoder_relu)
+        self.asymmetric3_2 = RegularBottleneck(128, kernel_size=5, padding=2, asymmetric=True, dropout_prob=0.1,
+                                               relu=encoder_relu)
+        self.dilated3_3 = RegularBottleneck(128, dilation=4, padding=4, dropout_prob=0.1, relu=encoder_relu)
+        self.regular3_4 = RegularBottleneck(128, padding=1, dropout_prob=0.1, relu=encoder_relu)
+        self.dilated3_5 = RegularBottleneck(128, dilation=8, padding=8, dropout_prob=0.1, relu=encoder_relu)
+        self.asymmetric3_6 = RegularBottleneck(128, kernel_size=5, asymmetric=True, padding=2, dropout_prob=0.1,
+                                               relu=encoder_relu)
+        self.dilated3_7 = RegularBottleneck(128, dilation=16, padding=16, dropout_prob=0.1, relu=encoder_relu)
 
         # Stage 4 - Decoder
-        self.upsample4_0 = UpsamplingBottleneck(
-            128, 64, dropout_prob=0.1, relu=decoder_relu)
-        self.regular4_1 = RegularBottleneck(
-            64, padding=1, dropout_prob=0.1, relu=decoder_relu)
-        self.regular4_2 = RegularBottleneck(
-            64, padding=1, dropout_prob=0.1, relu=decoder_relu)
+        self.upsample4_0 = UpsamplingBottleneck(128, 64, dropout_prob=0.1, relu=decoder_relu)
+        self.regular4_1 = RegularBottleneck(64, padding=1, dropout_prob=0.1, relu=decoder_relu)
+        self.regular4_2 = RegularBottleneck(64, padding=1, dropout_prob=0.1, relu=decoder_relu)
 
         # Stage 5 - Decoder
-        self.upsample5_0 = UpsamplingBottleneck(
-            64, 16, dropout_prob=0.1, relu=decoder_relu)
-        self.regular5_1 = RegularBottleneck(
-            16, padding=1, dropout_prob=0.1, relu=decoder_relu)
-        self.transposed_conv = nn.ConvTranspose2d(
-            16,
-            num_classes,
-            kernel_size=3,
-            stride=2,
-            padding=1,
-            bias=False)
+        self.upsample5_0 = UpsamplingBottleneck(64, 16, dropout_prob=0.1, relu=decoder_relu)
+        self.regular5_1 = RegularBottleneck(16, padding=1, dropout_prob=0.1, relu=decoder_relu)
+
+        self.transposed_conv = nn.ConvTranspose2d(16, num_classes, kernel_size=3, stride=2, padding=1, bias=False)
 
     def forward(self, x):
         # Initial block
@@ -628,3 +569,33 @@ class ENet(nn.Module):
         x = self.transposed_conv(x, output_size=input_size)
 
         return x
+
+
+if __name__ == '__main__':
+    # import torch
+    # import torch.nn as nn
+    # import pandas as pd
+    #
+    # iris = pd.read_csv(
+    #     "https://gist.githubusercontent.com/netj/8836201/raw/6f9306ad21398ea43cba4f7d537619d0e07d5ae3/iris.csv")
+    # X = torch.tensor(iris.drop("variety", axis=1).values, dtype=torch.float)
+    # y = torch.tensor(
+    #     [0 if vty == "Setosa" else 1 if vty == "Versicolor" else 2 for vty in iris["variety"]],
+    #     dtype=torch.long
+    # )
+    #
+    # model = ENet(2)
+    # print(model)
+    # y_ = model(X)
+
+    input = torch.rand(4, 3, 10, 10)
+    kh, kw = 3, 3
+    weight = torch.rand(5, 3, kh, kw)
+    # offset and mask should have the same spatial size as the output
+    # of the convolution. In this case, for an input of 10, stride of 1
+    # and kernel size of 3, without padding, the output size is 8
+    offset = torch.rand(4, 2 * kh * kw, 8, 8)
+    mask = torch.rand(4, kh * kw, 8, 8)
+    out = deform_conv2d(input, offset, weight, mask=mask)
+    print(out.shape)
+
